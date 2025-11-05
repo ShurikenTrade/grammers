@@ -35,12 +35,14 @@ fn prepare_channel_difference(
     mut request: tl::functions::updates::GetChannelDifference,
     peer_auths: &PeerAuthCache,
     message_box: &mut MessageBoxes,
+    session: &dyn grammers_session::Session,
 ) -> Option<tl::functions::updates::GetChannelDifference> {
     let id = match &request.channel {
         tl::enums::InputChannel::Channel(channel) => PeerId::channel(channel.channel_id),
         _ => unreachable!(),
     };
 
+    // Try peer_auths first (fast path - updated from difference responses)
     if let Some(peer) = peer_auths.get(id) {
         request.channel = peer.into();
         request.limit = if peer_auths.is_self_bot() {
@@ -48,16 +50,35 @@ fn prepare_channel_difference(
         } else {
             USER_CHANNEL_DIFF_LIMIT
         };
-        trace!("requesting {:?}", request);
-        Some(request)
-    } else {
-        warn!(
-            "cannot getChannelDifference for {:?} as we're missing its hash",
-            id
-        );
-        message_box.end_channel_difference(PrematureEndReason::Banned);
-        None
+        trace!("requesting channel difference with pts={}", request.pts);
+        return Some(request);
     }
+
+    // Fallback to session peer cache (populated by iter_dialogs)
+    // This fixes the missing hash issue when UpdateStream is created before dialog fetching
+    if let Some(peer_info) = session.peer(id) {
+        let peer_ref = grammers_session::types::PeerRef::from(peer_info);
+        request.channel = peer_ref.into();
+        request.limit = if peer_auths.is_self_bot() {
+            BOT_CHANNEL_DIFF_LIMIT
+        } else {
+            USER_CHANNEL_DIFF_LIMIT
+        };
+        log::debug!(
+            "requesting channel difference for {:?} using session fallback (pts={})",
+            id,
+            request.pts
+        );
+        return Some(request);
+    }
+
+    // Still missing after both attempts - this shouldn't happen for dialogs
+    warn!(
+        "cannot getChannelDifference for {:?} as we're missing its hash (tried peer_auths and session)",
+        id
+    );
+    message_box.end_channel_difference(PrematureEndReason::Banned);
+    None
 }
 
 pub struct UpdateStream {
@@ -117,7 +138,7 @@ impl UpdateStream {
                     self.message_box.check_deadlines(), // first, as it might trigger differences
                     self.message_box.get_difference(),
                     self.message_box.get_channel_difference().and_then(|gd| {
-                        prepare_channel_difference(gd, &self.peer_auths, &mut self.message_box)
+                        prepare_channel_difference(gd, &self.peer_auths, &mut self.message_box, &*self.client.0.session)
                     }),
                 )
             };
