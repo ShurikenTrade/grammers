@@ -255,14 +255,11 @@ impl Message {
                 let peer_id = self.peer_id();
                 if matches!(peer_id.kind(), PeerKind::User | PeerKind::UserSelf) {
                     if self.outgoing() {
-                        let user_id = self
-                            .client
+                        self.client
                             .0
                             .session
                             .peer(PeerId::self_user())
-                            .unwrap()
-                            .id();
-                        Some(user_id)
+                            .map(|peer| peer.id())
                     } else {
                         Some(peer_id)
                     }
