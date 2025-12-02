@@ -169,19 +169,35 @@ impl PeerId {
     }
 
     /// Peer kind.
+    ///
+    /// Ranges per <https://core.telegram.org/api/bots/ids>:
+    /// - User: 1 to 1099511627775 (0xffffffffff)
+    /// - Chat: -999999999999 to -1
+    /// - Channel: -1997852516352 to -1000000000001
+    /// - Monoforum: -4000000000000 to -2002147483649
+    /// - Secret Chat: -2002147483648 to -1997852516353 (not yet supported)
     pub fn kind(self) -> PeerKind {
+        // User IDs: bot API range 1 to 0xffffffffff
         if 1 <= self.0 && self.0 <= 0xffffffffff {
             PeerKind::User
         } else if self.0 == SELF_USER_ID.0 {
             PeerKind::UserSelf
+        // Chat IDs: bot API range -999999999999 to -1
         } else if -999999999999 <= self.0 && self.0 <= -1 {
             PeerKind::Chat
-        } else if -1997852516352 <= self.0 && self.0 <= -1000000000001
-            || (-2002147483649 <= self.0 && self.0 <= -4000000000000)
+        // Channel IDs: bot API range -1997852516352 to -1000000000001
+        // Monoforum IDs: bot API range -4000000000000 to -2002147483649
+        } else if (-1997852516352 <= self.0 && self.0 <= -1000000000001)
+            || (-4000000000000 <= self.0 && self.0 <= -2002147483649)
         {
             PeerKind::Channel
         } else {
-            unreachable!()
+            // Secret Chat IDs: bot API range -2002147483648 to -1997852516353
+            let maybe_secret_chat = -2002147483648 <= self.0 && self.0 <= -1997852516353;
+            panic!(
+                "unknown PeerId value: {} (maybe_secret_chat: {}) - may need to handle a new peer type",
+                self.0, maybe_secret_chat
+            )
         }
     }
 
