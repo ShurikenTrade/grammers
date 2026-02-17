@@ -9,6 +9,7 @@
 use std::fmt;
 
 use grammers_tl_types as tl;
+use log::warn;
 
 /// A compact peer identifier.
 /// ```
@@ -61,6 +62,9 @@ pub enum PeerKind {
     Chat,
     /// The peer identity belongs to a [`tl::types::Channel`] or one of its derivatives.
     Channel,
+    /// The peer identity is of an unknown or unsupported type (e.g., secret chat).
+    /// Callers should handle this gracefully by skipping or ignoring the peer.
+    Unknown,
 }
 
 /// An exploded peer reference along with any known useful information about the peer.
@@ -139,30 +143,39 @@ impl PeerId {
     }
 
     /// Creates a peer identity for a user or bot account.
+    ///
+    /// Returns a sentinel `PeerId(0)` for out-of-range IDs instead of panicking.
     pub fn user(id: i64) -> Self {
         // https://core.telegram.org/api/bots/ids#user-ids
         if !(1 <= id && id <= 0xffffffffff) {
-            panic!("user ID out of range");
+            warn!("user ID out of range: {}", id);
+            return Self(0);
         }
 
         Self(id)
     }
 
     /// Creates a peer identity for a small group chat.
+    ///
+    /// Returns a sentinel `PeerId(0)` for out-of-range IDs instead of panicking.
     pub fn chat(id: i64) -> Self {
         // https://core.telegram.org/api/bots/ids#chat-ids
         if !(1 <= id && id <= 999999999999) {
-            panic!("chat ID out of range");
+            warn!("chat ID out of range: {}", id);
+            return Self(0);
         }
 
         Self(-id)
     }
 
     /// Creates a peer identity for a broadcast channel, megagroup, gigagroup or monoforum.
+    ///
+    /// Returns a sentinel `PeerId(0)` for out-of-range IDs instead of panicking.
     pub fn channel(id: i64) -> Self {
         // https://core.telegram.org/api/bots/ids#supergroup-channel-ids and #monoforum-ids
         if !((1 <= id && id <= 997852516352) || (1002147483649 <= id && id <= 3000000000000)) {
-            panic!("channel ID out of range");
+            warn!("channel ID out of range: {}", id);
+            return Self(0);
         }
 
         Self(-(1000000000000 + id))
@@ -194,10 +207,11 @@ impl PeerId {
         } else {
             // Secret Chat IDs: bot API range -2002147483648 to -1997852516353
             let maybe_secret_chat = -2002147483648 <= self.0 && self.0 <= -1997852516353;
-            panic!(
-                "unknown PeerId value: {} (maybe_secret_chat: {}) - may need to handle a new peer type",
+            warn!(
+                "unknown PeerId value: {} (maybe_secret_chat: {})",
                 self.0, maybe_secret_chat
-            )
+            );
+            PeerKind::Unknown
         }
     }
 
@@ -209,11 +223,14 @@ impl PeerId {
         self.0
     }
 
-    /// Unpacked peer identifier. Panics if [`Self::kind`] is [`PeerKind::UserSelf`].
+    /// Unpacked peer identifier.
+    ///
+    /// Returns `0` if [`Self::kind`] is [`PeerKind::UserSelf`] or [`PeerKind::Unknown`],
+    /// since the true ID is not available.
     pub fn bare_id(&self) -> i64 {
         match self.kind() {
             PeerKind::User => self.0,
-            PeerKind::UserSelf => panic!("self-user ID not known"),
+            PeerKind::UserSelf | PeerKind::Unknown => 0,
             PeerKind::Chat => -self.0,
             PeerKind::Channel => -self.0 - 1000000000000,
         }
@@ -311,7 +328,11 @@ impl From<tl::enums::InputPeer> for PeerRef {
     fn from(peer: tl::enums::InputPeer) -> Self {
         match peer {
             tl::enums::InputPeer::Empty => {
-                panic!("InputPeer::Empty cannot be converted to any Peer");
+                warn!("InputPeer::Empty converted to sentinel PeerRef");
+                PeerRef {
+                    id: PeerId(0),
+                    auth: PeerAuth::default(),
+                }
             }
             tl::enums::InputPeer::PeerSelf => PeerRef {
                 id: SELF_USER_ID,
@@ -482,7 +503,10 @@ impl From<PeerId> for tl::enums::Peer {
             PeerKind::User => tl::enums::Peer::User(tl::types::PeerUser {
                 user_id: peer.bare_id(),
             }),
-            PeerKind::UserSelf => panic!("self-user ID not known"),
+            PeerKind::UserSelf | PeerKind::Unknown => {
+                warn!("converting {:?} PeerId to Peer::User with id 0", peer.kind());
+                tl::enums::Peer::User(tl::types::PeerUser { user_id: 0 })
+            }
             PeerKind::Chat => tl::enums::Peer::Chat(tl::types::PeerChat {
                 chat_id: peer.bare_id(),
             }),
@@ -508,6 +532,7 @@ impl From<PeerRef> for tl::enums::InputPeer {
                 channel_id: peer.id.bare_id(),
                 access_hash: peer.auth.hash(),
             }),
+            PeerKind::Unknown => tl::enums::InputPeer::Empty,
         }
     }
 }
@@ -522,6 +547,7 @@ impl From<PeerRef> for tl::enums::InputUser {
             PeerKind::UserSelf => tl::enums::InputUser::UserSelf,
             PeerKind::Chat => tl::enums::InputUser::Empty,
             PeerKind::Channel => tl::enums::InputUser::Empty,
+            PeerKind::Unknown => tl::enums::InputUser::Empty,
         }
     }
 }
@@ -533,6 +559,7 @@ impl From<PeerRef> for i64 {
             PeerKind::UserSelf => EMPTY_CHAT_ID,
             PeerKind::Chat => peer.id.bare_id(),
             PeerKind::Channel => EMPTY_CHAT_ID,
+            PeerKind::Unknown => EMPTY_CHAT_ID,
         }
     }
 }
@@ -543,6 +570,7 @@ impl From<PeerRef> for tl::enums::InputChannel {
             PeerKind::User => tl::enums::InputChannel::Empty,
             PeerKind::UserSelf => tl::enums::InputChannel::Empty,
             PeerKind::Chat => tl::enums::InputChannel::Empty,
+            PeerKind::Unknown => tl::enums::InputChannel::Empty,
             PeerKind::Channel => tl::enums::InputChannel::Channel(tl::types::InputChannel {
                 channel_id: peer.id.bare_id(),
                 access_hash: peer.auth.hash(),

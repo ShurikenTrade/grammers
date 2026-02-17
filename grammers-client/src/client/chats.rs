@@ -662,7 +662,13 @@ impl Client {
                     tl::enums::messages::Chats::Slice(chat_slice) => chat_slice.chats,
                 };
                 if res.len() != 1 {
-                    panic!("fetching only one chat should exactly return one chat");
+                    warn!("fetching one chat returned {} results", res.len());
+                    return Err(InvocationError::Rpc(RpcError {
+                        code: 404,
+                        name: "CHAT_NOT_FOUND".to_string(),
+                        value: None,
+                        caused_by: None,
+                    }));
                 }
                 Peer::from_raw(res.pop().unwrap())
             }
@@ -677,9 +683,24 @@ impl Client {
                     tl::enums::messages::Chats::Slice(chat_slice) => chat_slice.chats,
                 };
                 if res.len() != 1 {
-                    panic!("fetching only one chat should exactly return one chat");
+                    warn!("fetching one channel returned {} results", res.len());
+                    return Err(InvocationError::Rpc(RpcError {
+                        code: 404,
+                        name: "CHANNEL_NOT_FOUND".to_string(),
+                        value: None,
+                        caused_by: None,
+                    }));
                 }
                 Peer::from_raw(res.pop().unwrap())
+            }
+            PeerKind::Unknown => {
+                warn!("cannot resolve peer with unknown kind: {:?}", peer.id);
+                return Err(InvocationError::Rpc(RpcError {
+                    code: 400,
+                    name: "PEER_ID_INVALID".to_string(),
+                    value: None,
+                    caused_by: None,
+                }));
             }
         })
     }

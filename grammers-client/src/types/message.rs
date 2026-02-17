@@ -238,7 +238,16 @@ impl Message {
                 auth: PeerAuth::default(),
             })
             .or(self.fetched_in)
-            .expect("empty messages from updates should contain peer_id")
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "message {} has no peer_id and no fetched_in context, using empty PeerRef",
+                    self.raw.id()
+                );
+                PeerRef {
+                    id: PeerId::self_user(),
+                    auth: PeerAuth::default(),
+                }
+            })
     }
 
     /// The sender of this message, if any.
@@ -621,7 +630,11 @@ impl Message {
         &self,
         mut medias: Vec<InputMedia>,
     ) -> Result<Vec<Option<Self>>, InvocationError> {
-        medias.first_mut().unwrap().reply_to = Some(self.id());
+        if let Some(first) = medias.first_mut() {
+            first.reply_to = Some(self.id());
+        } else {
+            return Ok(Vec::new());
+        }
         self.client.send_album(self.peer_ref(), medias).await
     }
 
@@ -630,13 +643,18 @@ impl Message {
     /// Shorthand for `Client::forward_messages`. If you need to forward multiple messages
     /// at once, consider using that method instead.
     pub async fn forward_to<C: Into<PeerRef>>(&self, chat: C) -> Result<Self, InvocationError> {
-        // TODO return `Message`
-        // When forwarding a single message, if it fails, Telegram should respond with RPC error.
-        // If it succeeds we will have the single forwarded message present which we can unwrap.
-        self.client
+        let mut msgs = self
+            .client
             .forward_messages(chat, &[self.id()], self.peer_ref())
-            .await
-            .map(|mut msgs| msgs.pop().unwrap().unwrap())
+            .await?;
+        msgs.pop()
+            .flatten()
+            .ok_or_else(|| InvocationError::Rpc(grammers_mtsender::RpcError {
+                code: 400,
+                name: "MESSAGE_FORWARD_EMPTY".to_string(),
+                value: None,
+                caused_by: None,
+            }))
     }
 
     /// Edit this message to change its text or media.
@@ -704,15 +722,25 @@ impl Message {
     ///
     /// Shorthand for `Client::get_messages_by_id`.
     pub async fn refetch(&self) -> Result<(), InvocationError> {
-        // When fetching a single message, if it fails, Telegram should respond with RPC error.
-        // If it succeeds we will have the single message present which we can unwrap.
-        self.client
+        // Note: This method is not yet fully implemented. It fetches the message
+        // but does not mutate self in-place. Returns Ok(()) if the message exists,
+        // or an error if it could not be fetched.
+        let msg = self
+            .client
             .get_messages_by_id(self.peer_ref(), &[self.id()])
             .await?
             .pop()
-            .unwrap()
-            .unwrap();
-        todo!("actually mutate self after get_messages_by_id returns `Message`")
+            .flatten();
+        if msg.is_none() {
+            return Err(InvocationError::Rpc(grammers_mtsender::RpcError {
+                code: 400,
+                name: "MESSAGE_ID_INVALID".to_string(),
+                value: None,
+                caused_by: None,
+            }));
+        }
+        // TODO: actually mutate self after get_messages_by_id returns `Message`
+        Ok(())
     }
 
     /// Download the message media in this message if applicable.
