@@ -240,6 +240,7 @@ impl Session for SqliteSession {
                         }
                     }),
                 },
+                PeerKind::Unknown => return None,
             })
         };
 

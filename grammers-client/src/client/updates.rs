@@ -14,7 +14,7 @@ use super::{Client, UpdatesConfiguration};
 use crate::types::{PeerMap, Update};
 use grammers_mtsender::InvocationError;
 use grammers_session::PeerAuthCache;
-use grammers_session::types::{PeerId, UpdateState, UpdatesState};
+use grammers_session::types::{PeerId, PeerKind, UpdateState, UpdatesState};
 pub use grammers_session::updates::{MessageBoxes, PrematureEndReason, State, UpdatesLike};
 use grammers_tl_types as tl;
 use log::{trace, warn};
@@ -38,8 +38,26 @@ fn prepare_channel_difference(
     session: &dyn grammers_session::Session,
 ) -> Option<tl::functions::updates::GetChannelDifference> {
     let id = match &request.channel {
-        tl::enums::InputChannel::Channel(channel) => PeerId::channel(channel.channel_id),
-        _ => unreachable!(),
+        tl::enums::InputChannel::Channel(channel) => {
+            let peer = PeerId::channel(channel.channel_id);
+            if peer.kind() == PeerKind::Unknown {
+                warn!(
+                    "channel_id out of range in prepare_channel_difference: {}",
+                    channel.channel_id
+                );
+                message_box.end_channel_difference(PrematureEndReason::Banned);
+                return None;
+            }
+            peer
+        }
+        other => {
+            warn!(
+                "unexpected InputChannel variant in prepare_channel_difference: {:?}",
+                other
+            );
+            message_box.end_channel_difference(PrematureEndReason::Banned);
+            return None;
+        }
     };
 
     // Try peer_auths first (fast path - updated from difference responses)

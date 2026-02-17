@@ -32,7 +32,7 @@ use defs::Key;
 pub use defs::{Gap, MessageBox, MessageBoxes, State, UpdatesLike};
 use defs::{LiveEntry, NO_DATE, NO_PTS, NO_SEQ, POSSIBLE_GAP_TIMEOUT, PossibleGap, PtsInfo};
 use grammers_tl_types as tl;
-use log::{debug, info, trace};
+use log::{debug, trace, warn};
 use std::cmp::Ordering;
 use std::time::Duration;
 #[cfg(not(test))]
@@ -594,10 +594,16 @@ impl MessageBoxes {
     pub fn get_difference(&self) -> Option<tl::functions::updates::GetDifference> {
         for entry in [Key::Common, Key::Secondary] {
             if self.getting_diff_for.contains(&entry) {
-                let pts = self
-                    .entry(Key::Common)
-                    .map(|entry| entry.pts)
-                    .expect("common entry to exist when getting difference for it");
+                let pts = match self.entry(Key::Common).map(|entry| entry.pts) {
+                    Some(pts) => pts,
+                    None => {
+                        warn!(
+                            "common entry missing when getting diff for {:?}, skipping",
+                            entry
+                        );
+                        continue;
+                    }
+                };
 
                 let gd = tl::functions::updates::GetDifference {
                     pts,
@@ -719,9 +725,13 @@ impl MessageBoxes {
 
         // It is possible that the result from `GetDifference` includes users with `min = true`.
         // TODO in that case, we will have to resort to getUsers.
-        let (mut result_updates, users, chats) = self
-            .process_updates(us)
-            .expect("gap is detected while applying difference");
+        let (mut result_updates, users, chats) = match self.process_updates(us) {
+            Ok(result) => result,
+            Err(_gap) => {
+                warn!("gap detected while applying difference, returning partial result");
+                (Vec::new(), Vec::new(), Vec::new())
+            }
+        };
 
         result_updates.extend(
             new_messages
@@ -780,7 +790,11 @@ impl MessageBoxes {
             trace!("requesting {:?}", gd);
             Some(gd)
         } else {
-            panic!("Should not try to get difference for an entry {key:?} without known state");
+            warn!(
+                "cannot get channel difference for entry {:?} without known state, skipping",
+                key
+            );
+            None
         }
     }
 
@@ -789,14 +803,19 @@ impl MessageBoxes {
         &mut self,
         difference: tl::enums::updates::ChannelDifference,
     ) -> defs::UpdateAndPeers {
-        let (key, channel_id) = self
+        let (key, channel_id) = match self
             .getting_diff_for
             .iter()
             .find_map(|&key| match key {
                 Key::Channel(id) => Some((key, id)),
                 _ => None,
-            })
-            .expect("applying channel difference to have a channel in getting_diff_for");
+            }) {
+            Some(result) => result,
+            None => {
+                warn!("no channel found in getting_diff_for when applying channel difference");
+                return (Vec::new(), Vec::new(), Vec::new());
+            }
+        };
 
         trace!(
             "applying channel difference for {}: {:?}",
@@ -833,9 +852,16 @@ impl MessageBoxes {
             date: NO_DATE,
             seq: NO_SEQ,
         }));
-        let (mut result_updates, users, chats) = self
-            .process_updates(us)
-            .expect("gap is detected while applying channel difference");
+        let (mut result_updates, users, chats) = match self.process_updates(us) {
+            Ok(result) => result,
+            Err(_gap) => {
+                warn!(
+                    "gap detected while applying channel {} difference, returning partial result",
+                    channel_id
+                );
+                (Vec::new(), Vec::new(), Vec::new())
+            }
+        };
 
         result_updates.extend(new_messages.into_iter().map(|message| {
             (
@@ -859,14 +885,19 @@ impl MessageBoxes {
     }
 
     pub fn end_channel_difference(&mut self, reason: PrematureEndReason) {
-        let (key, channel_id) = self
+        let (key, channel_id) = match self
             .getting_diff_for
             .iter()
             .find_map(|&key| match key {
                 Key::Channel(id) => Some((key, id)),
                 _ => None,
-            })
-            .expect("ending channel difference to have a channel in getting_diff_for");
+            }) {
+            Some(result) => result,
+            None => {
+                warn!("no channel found in getting_diff_for when ending channel difference");
+                return;
+            }
+        };
 
         trace!(
             "ending channel difference for {} because {:?}",
