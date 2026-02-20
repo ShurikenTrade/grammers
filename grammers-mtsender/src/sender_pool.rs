@@ -368,20 +368,27 @@ async fn run_sender(
     mut rpc_rx: mpsc::UnboundedReceiver<Rpc>,
     updates: mpsc::UnboundedSender<UpdatesLike>,
 ) -> Result<(), ReadError> {
-    loop {
+    let result = loop {
         tokio::select! {
             step = sender.step() => match step {
                 Ok(all_new_updates) => all_new_updates.into_iter().for_each(|new_updates| {
                     let _ = updates.send(new_updates);
                 }),
-                Err(err) => break Err(err),
+                Err(err) => {
+                    log::warn!("run_sender exiting: network error: {}", err);
+                    break Err(err);
+                }
             },
             rpc = rpc_rx.recv() => match rpc {
                 Some(rpc) => sender.enqueue_body(rpc.body, rpc.tx),
-                None => break Ok(()),
+                None => {
+                    log::info!("run_sender exiting: rpc channel closed (client dropped)");
+                    break Ok(());
+                }
             },
         }
-    }
+    };
+    result
 }
 
 impl fmt::Debug for Request {

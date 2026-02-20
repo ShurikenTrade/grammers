@@ -17,7 +17,7 @@ use grammers_session::PeerAuthCache;
 use grammers_session::types::{PeerId, PeerKind, UpdateState, UpdatesState};
 pub use grammers_session::updates::{MessageBoxes, PrematureEndReason, State, UpdatesLike};
 use grammers_tl_types as tl;
-use log::{trace, warn};
+use log::{debug, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,7 +68,10 @@ fn prepare_channel_difference(
         } else {
             USER_CHANNEL_DIFF_LIMIT
         };
-        trace!("requesting channel difference with pts={}", request.pts);
+        debug!(
+            "prepare_channel_difference: {:?} resolved via peer_auths (pts={})",
+            id, request.pts
+        );
         return Some(request);
     }
 
@@ -153,6 +156,15 @@ impl UpdateStream {
                 if let Some(update) = self.buffer.pop_front() {
                     return Ok(update);
                 }
+
+                log::info!(
+                    "next_raw: getting_diff_for={}, entries={}, possible_gaps={}, buffer={}",
+                    self.message_box.getting_diff_for_count(),
+                    self.message_box.entries_count(),
+                    self.message_box.possible_gaps_count(),
+                    self.buffer.len(),
+                );
+
                 (
                     self.message_box.check_deadlines(), // first, as it might trigger differences
                     self.message_box.get_difference(),
