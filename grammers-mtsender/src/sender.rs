@@ -366,10 +366,24 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
     /// Handle errors that occured while performing I/O.
     fn on_error(&mut self, error: &ReadError) {
+        let pending_types: Vec<&str> = self
+            .requests
+            .iter()
+            .map(|r| {
+                if r.body.len() >= 4 {
+                    let id = u32::from_le_bytes([r.body[0], r.body[1], r.body[2], r.body[3]]);
+                    tl::name_for_id(id)
+                } else {
+                    "unknown"
+                }
+            })
+            .collect();
+
         log::warn!(
-            "marking all {} request(s) as failed: {}",
+            "marking all {} request(s) as failed: {}; pending_requests={:?}",
             self.requests.len(),
-            &error
+            &error,
+            pending_types,
         );
 
         self.requests

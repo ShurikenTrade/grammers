@@ -241,6 +241,21 @@ impl MessageBoxes {
         self.entries.is_empty()
     }
 
+    /// Number of entries currently queued for getting difference.
+    pub fn getting_diff_for_count(&self) -> usize {
+        self.getting_diff_for.len()
+    }
+
+    /// Number of live entries tracked.
+    pub fn entries_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of entries with possible gaps.
+    pub fn possible_gaps_count(&self) -> usize {
+        self.possible_gaps.len()
+    }
+
     /// Return the next deadline when receiving updates should timeout.
     ///
     /// If a deadline expired, the corresponding entries will be marked as needing to get its difference.
@@ -253,6 +268,8 @@ impl MessageBoxes {
         }
 
         if now >= self.next_deadline {
+            let prev_diff_count = self.getting_diff_for.len();
+
             self.getting_diff_for
                 .extend(self.entries.iter().filter_map(|entry| {
                     if now >= entry.effective_deadline() {
@@ -262,6 +279,16 @@ impl MessageBoxes {
                         None
                     }
                 }));
+
+            let added = self.getting_diff_for.len() - prev_diff_count;
+            if added > 0 {
+                warn!(
+                    "check_deadlines: queued {} entries for difference (total getting_diff_for={}, total entries={})",
+                    added,
+                    self.getting_diff_for.len(),
+                    self.entries.len(),
+                );
+            }
 
             // When extending `getting_diff_for`, it's important to have the moral equivalent of
             // `begin_get_diff` (that is, clear possible gaps if we're now getting difference).
