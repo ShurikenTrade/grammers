@@ -35,6 +35,10 @@ Used to coordinate the asynchronous methods of the client.
 
 Used to log the execution of the client to help debug issues.
 
+## tracing
+
+Used for structured, span-based diagnostic logging of update processing.
+
 ## md5
 
 Needed when uploading files to Telegram.
