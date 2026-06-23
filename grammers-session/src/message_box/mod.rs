@@ -618,7 +618,7 @@ impl MessageBoxes {
 /// Getting and applying account difference.
 impl MessageBoxes {
     /// Return the request that needs to be made to get the difference, if any.
-    pub fn get_difference(&self) -> Option<tl::functions::updates::GetDifference> {
+    pub fn get_difference(&mut self) -> Option<tl::functions::updates::GetDifference> {
         for entry in [Key::Common, Key::Secondary] {
             if self.getting_diff_for.contains(&entry) {
                 let pts = match self.entry(Key::Common).map(|entry| entry.pts) {
@@ -628,6 +628,13 @@ impl MessageBoxes {
                             "common entry missing when getting diff for {:?}, skipping",
                             entry
                         );
+                        // Without a common pts this difference can never be formed. Leaving the
+                        // entry in `getting_diff_for` makes `check_deadlines` return the (past)
+                        // deadline forever, so the update loop busy-loops calling `get_difference`
+                        // and re-logging this warning at ~100% CPU. Drain it (which also resets
+                        // its deadline) so the loop can sleep and self-heal once the common state
+                        // is known again.
+                        self.try_end_get_diff(entry);
                         continue;
                     }
                 };
@@ -796,7 +803,9 @@ impl MessageBoxes {
     ///
     /// Note that this only returns the skeleton of a request.
     /// Both the channel hash and limit will be their default value.
-    pub fn get_channel_difference(&self) -> Option<tl::functions::updates::GetChannelDifference> {
+    pub fn get_channel_difference(
+        &mut self,
+    ) -> Option<tl::functions::updates::GetChannelDifference> {
         let (key, channel_id) = self.getting_diff_for.iter().find_map(|&key| match key {
             Key::Channel(id) => Some((key, id)),
             _ => None,
@@ -821,6 +830,9 @@ impl MessageBoxes {
                 "cannot get channel difference for entry {:?} without known state, skipping",
                 key
             );
+            // Drain the un-satisfiable entry so the update loop does not busy-loop on it (the
+            // same failure mode fixed in `get_difference`). Upstream panicked here instead.
+            self.try_end_get_diff(key);
             None
         }
     }

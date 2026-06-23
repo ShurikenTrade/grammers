@@ -141,7 +141,7 @@ fn test_connect_flow_empty() {
         seq: NO_SEQ,
         channels: Vec::new(),
     };
-    let message_boxes = MessageBoxes::load(state.clone());
+    let mut message_boxes = MessageBoxes::load(state.clone());
 
     assert!(message_boxes.is_empty());
     assert_eq!(message_boxes.get_difference(), None);
@@ -159,7 +159,7 @@ fn test_connect_flow_with_data() {
         seq: 78,
         channels: vec![ChannelState { id: 43, pts: 21 }],
     };
-    let message_boxes = MessageBoxes::load(state.clone());
+    let mut message_boxes = MessageBoxes::load(state.clone());
 
     assert!(!message_boxes.is_empty());
     assert_eq!(
@@ -171,6 +171,51 @@ fn test_connect_flow_with_data() {
         Some(get_channel_difference(43, 21))
     );
     assert_eq!(message_boxes.session_state(), state)
+}
+
+// Regression: a session restored with a secondary (qts) state but no common (pts) state
+// queues `Secondary` in `getting_diff_for` while no `Common` entry exists. `get_difference`
+// cannot form a request without the common pts, so it logs and skips — but it must also drain
+// the un-satisfiable entry. If it leaves `Secondary` queued, `check_deadlines` keeps returning
+// the past deadline and the client busy-loops on `get_difference`/None at ~100% CPU.
+#[test]
+fn test_get_difference_drains_entry_when_common_state_missing() {
+    reset_time();
+    let state = UpdatesState {
+        pts: NO_PTS,
+        qts: 34,
+        date: 56,
+        seq: 78,
+        channels: Vec::new(),
+    };
+    let mut message_boxes = MessageBoxes::load(state);
+
+    // Precondition: the secondary entry is queued for difference, with no common entry present.
+    assert_eq!(message_boxes.getting_diff_for_count(), 1);
+
+    // No common pts means the request can never be formed.
+    assert_eq!(message_boxes.get_difference(), None);
+
+    // The un-satisfiable entry must be drained so the update loop can sleep instead of spinning.
+    assert_eq!(message_boxes.getting_diff_for_count(), 0);
+}
+
+// Mirror of the above for the channel-difference path. Upstream panicked when a channel was
+// queued for difference without known state; our fork must instead drain it. The normal API
+// never queues a channel without its backing entry, so the state is constructed directly.
+#[test]
+fn test_get_channel_difference_drains_entry_without_known_state() {
+    reset_time();
+    let mut message_boxes = MessageBoxes::new();
+
+    message_boxes.getting_diff_for.push(super::Key::Channel(123));
+    assert_eq!(message_boxes.getting_diff_for_count(), 1);
+
+    // No known state for the channel means the request can never be formed.
+    assert_eq!(message_boxes.get_channel_difference(), None);
+
+    // The un-satisfiable entry must be drained so the update loop does not spin.
+    assert_eq!(message_boxes.getting_diff_for_count(), 0);
 }
 
 #[test]
