@@ -27,6 +27,16 @@ const NUM_FUTURE_SALTS: i32 = 64;
 /// Used to prevent small fluctuations in the system clock.
 const SALT_USE_DELAY: i32 = 60;
 
+/// Maximum depth of nested service messages (`msg_container` / `gzip_packed`) that
+/// [`Encrypted::process_message`] will recurse into before giving up.
+///
+/// Each level of nesting costs one stack frame, so an unbounded chain (for example a
+/// `gzip_packed` whose payload decompresses to another `gzip_packed`) overflows the worker
+/// thread's stack and aborts the whole process. Legitimate Telegram traffic nests only a
+/// couple of levels deep (a container holding messages, one of which may be gzip-compressed),
+/// so this generous bound never rejects valid data while still capping the recursion.
+const MAX_RECURSION_DEPTH: usize = 16;
+
 static UPDATE_IDS: [u32; 8] = [
     tl::types::UpdateShortMessage::CONSTRUCTOR_ID,
     tl::types::UpdateShortChatMessage::CONSTRUCTOR_ID,
@@ -284,7 +294,19 @@ impl Encrypted {
         self.msg_count = 0;
     }
 
-    fn process_message(&mut self, message: manual_tl::Message) -> Result<(), DeserializeError> {
+    fn process_message(
+        &mut self,
+        message: manual_tl::Message,
+        depth: usize,
+    ) -> Result<(), DeserializeError> {
+        // Containers and gzip_packed bodies are handled by recursing back into this method, so a
+        // payload that nests them without bound (e.g. a gzip_packed that decompresses to another
+        // gzip_packed) would recurse until the stack overflows and the process aborts. Refuse to
+        // descend past a sane depth instead; the caller treats this like any other bad message.
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(DeserializeError::RecursionLimitExceeded { depth });
+        }
+
         if message.requires_ack() {
             self.pending_ack.push(message.msg_id);
         }
@@ -332,11 +354,11 @@ impl Encrypted {
                 self.handle_new_session_created(message)
             }
             // Containers (Simple Container)
-            manual_tl::MessageContainer::CONSTRUCTOR_ID => self.handle_container(message),
+            manual_tl::MessageContainer::CONSTRUCTOR_ID => self.handle_container(message, depth),
             // Message Copies
             manual_tl::MessageCopy::CONSTRUCTOR_ID => self.handle_msg_copy(message),
             // Packed Object
-            manual_tl::GzipPacked::CONSTRUCTOR_ID => self.handle_gzip_packed(message),
+            manual_tl::GzipPacked::CONSTRUCTOR_ID => self.handle_gzip_packed(message, depth),
             // HTTP Wait/Long Poll
             tl::types::HttpWait::CONSTRUCTOR_ID => self.handle_http_wait(message),
             _ => self.handle_update(message),
@@ -1056,10 +1078,14 @@ impl Encrypted {
     ///
     /// [Containers]: https://core.telegram.org/mtproto/service_messages#containers
     /// [Simple Container]: https://core.telegram.org/mtproto/service_messages#simple-container
-    fn handle_container(&mut self, message: manual_tl::Message) -> Result<(), DeserializeError> {
+    fn handle_container(
+        &mut self,
+        message: manual_tl::Message,
+        depth: usize,
+    ) -> Result<(), DeserializeError> {
         let container = manual_tl::MessageContainer::from_bytes(&message.body)?;
         for inner_message in container.messages {
-            self.process_message(inner_message)?;
+            self.process_message(inner_message, depth + 1)?;
         }
 
         Ok(())
@@ -1105,12 +1131,19 @@ impl Encrypted {
     /// client to server.
     ///
     /// [Packed Object]: https://core.telegram.org/mtproto/service_messages#packed-object
-    fn handle_gzip_packed(&mut self, message: manual_tl::Message) -> Result<(), DeserializeError> {
+    fn handle_gzip_packed(
+        &mut self,
+        message: manual_tl::Message,
+        depth: usize,
+    ) -> Result<(), DeserializeError> {
         let container = manual_tl::GzipPacked::from_bytes(&message.body)?;
-        self.process_message(manual_tl::Message {
-            body: container.decompress()?,
-            ..message
-        })
+        self.process_message(
+            manual_tl::Message {
+                body: container.decompress()?,
+                ..message
+            },
+            depth + 1,
+        )
         .map(|_| ())
     }
 
@@ -1304,7 +1337,7 @@ impl Mtp for Encrypted {
             panic!("wrong session id");
         }
 
-        self.process_message(manual_tl::Message::deserialize(&mut buffer)?)?;
+        self.process_message(manual_tl::Message::deserialize(&mut buffer)?, 0)?;
 
         // For simplicity, and to avoid passing too much stuff around (RPC results, updates),
         // the processing result is stored in self. After processing is done, that temporary
@@ -1342,6 +1375,52 @@ mod tests {
         assert_eq!(&buffer[12..16], [body.len() as u8, 0, 0, 0]);
         // buffer[16..] is the body, which is padded to 4 bytes
         assert_eq!(&buffer[16..], body);
+    }
+
+    // Regression: a peer can wrap a service message in arbitrarily many `gzip_packed`
+    // (or `msg_container`) layers. `process_message` recurses once per layer, so without a
+    // depth limit a deeply nested payload overflows the worker thread's stack and aborts the
+    // whole process (observed in prod as exit 139 / SIGSEGV, surviving even an 8x stack bump).
+    // The decode must instead bail with an error and keep the connection alive.
+    #[test]
+    fn process_message_rejects_deeply_nested_gzip_instead_of_overflowing() {
+        let mut mtproto = Encrypted::build().finish(auth_key());
+
+        // Terminal payload: an empty `msg_container`, which `process_message` handles as a
+        // no-op and returns `Ok`. With no recursion guard the whole nest therefore succeeds.
+        let mut body = vec![
+            MSG_CONTAINER_HEADER[0],
+            MSG_CONTAINER_HEADER[1],
+            MSG_CONTAINER_HEADER[2],
+            MSG_CONTAINER_HEADER[3],
+            0,
+            0,
+            0,
+            0, // vector length: 0 inner messages
+        ];
+
+        // Wrap it far deeper than any legitimate Telegram nesting (container -> message ->
+        // gzip -> rpc_result is ~3-4 deep), but shallow enough that the *old* code recurses
+        // without overflowing — so the test fails cleanly (Ok) rather than crashing the runner.
+        for _ in 0..32 {
+            let mut wrapped = Vec::new();
+            manual_tl::GzipPacked::new(&body).serialize(&mut wrapped);
+            body = wrapped;
+        }
+
+        let result = mtproto.process_message(
+            manual_tl::Message {
+                msg_id: 1,
+                seq_no: 0,
+                body,
+            },
+            0,
+        );
+
+        assert!(
+            matches!(result, Err(DeserializeError::RecursionLimitExceeded { .. })),
+            "deeply nested gzip_packed must be rejected with RecursionLimitExceeded, got {result:?}"
+        );
     }
 
     #[test]

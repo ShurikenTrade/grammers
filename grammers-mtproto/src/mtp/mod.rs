@@ -140,6 +140,12 @@ pub enum DeserializeError {
 
     /// Attempting to decrypt the message failed in some way.
     DecryptionError(crypto::Error),
+
+    /// A service message nested other service messages (`msg_container` /
+    /// `gzip_packed`) beyond the maximum depth we are willing to recurse into.
+    /// Bailing here keeps a malicious or corrupt payload from overflowing the
+    /// stack and aborting the process.
+    RecursionLimitExceeded { depth: usize },
 }
 
 impl std::error::Error for DeserializeError {}
@@ -165,6 +171,10 @@ impl fmt::Display for DeserializeError {
             Self::DecompressionFailed => write!(f, "failed to decompress server's data"),
             Self::UnexpectedConstructor { id } => write!(f, "unexpected constructor: {id:08x}"),
             Self::DecryptionError(ref error) => write!(f, "failed to decrypt message: {error}"),
+            Self::RecursionLimitExceeded { depth } => write!(
+                f,
+                "server message nested service messages too deeply (depth {depth})"
+            ),
         }
     }
 }
