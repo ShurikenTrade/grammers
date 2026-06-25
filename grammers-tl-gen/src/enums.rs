@@ -270,7 +270,12 @@ fn write_deserializable<W: Write>(
     )?;
     writeln!(file, "{indent}        use crate::Identifiable;")?;
     writeln!(file, "{indent}        let id = u32::deserialize(buf)?;")?;
-    writeln!(file, "{indent}        Ok(match id {{")?;
+    // Bound recursion over self-referential boxed types (e.g. `RichText`). Every nesting level
+    // passes through an enum `deserialize`, so guarding here caps the depth before a deeply nested
+    // value can overflow the stack. The matching `leave_recursion` runs only on the success path;
+    // any error aborts the whole deserialization, so the counter need not be restored.
+    writeln!(file, "{indent}        buf.enter_recursion()?;")?;
+    writeln!(file, "{indent}        let __deserialized = match id {{")?;
     for d in metadata.defs_with_type(ty) {
         write!(
             file,
@@ -305,7 +310,9 @@ fn write_deserializable<W: Write>(
         "{indent}            _ => return Err(\
          crate::deserialize::Error::UnexpectedConstructor {{ id }}),"
     )?;
-    writeln!(file, "{indent}        }})")?;
+    writeln!(file, "{indent}        }};")?;
+    writeln!(file, "{indent}        buf.leave_recursion();")?;
+    writeln!(file, "{indent}        Ok(__deserialized)")?;
     writeln!(file, "{indent}    }}")?;
     writeln!(file, "{indent}}}")?;
     Ok(())
