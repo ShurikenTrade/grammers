@@ -186,6 +186,9 @@ impl From<tl::deserialize::Error> for DeserializeError {
         match error {
             Err::UnexpectedEof => DeserializeError::MessageBufferTooSmall,
             Err::UnexpectedConstructor { id } => DeserializeError::UnexpectedConstructor { id },
+            Err::RecursionLimitExceeded => DeserializeError::RecursionLimitExceeded {
+                depth: tl::deserialize::MAX_RECURSION_DEPTH,
+            },
         }
     }
 }

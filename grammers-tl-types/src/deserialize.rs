@@ -33,6 +33,11 @@ pub enum Error {
         /// The unexpected constructor identifier.
         id: u32,
     },
+
+    /// A recursive boxed type was nested deeper than [`MAX_RECURSION_DEPTH`] allows. Bailing
+    /// prevents a deeply-nested value (e.g. a `RichText` chain in a webpage preview) from
+    /// overflowing the stack while it is being deserialized.
+    RecursionLimitExceeded,
 }
 
 impl std::error::Error for Error {}
@@ -42,6 +47,7 @@ impl fmt::Display for Error {
         match *self {
             Self::UnexpectedEof => write!(f, "unexpected eof"),
             Self::UnexpectedConstructor { id } => write!(f, "unexpected constructor: {id:08x}"),
+            Self::RecursionLimitExceeded => write!(f, "recursion limit exceeded while deserializing"),
         }
     }
 }
@@ -51,12 +57,47 @@ impl fmt::Display for Error {
 pub struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// Current nesting depth of boxed-enum deserialization, used to bound recursion over
+    /// self-referential types (e.g. `RichText`, `PageBlock`, `JSONValue`). See
+    /// [`Cursor::enter_recursion`].
+    depth: usize,
 }
+
+/// Maximum nesting depth of recursive boxed types we are willing to deserialize before bailing.
+///
+/// Recursive Telegram types (notably `RichText`, whose variants wrap a `text:RichText`) recurse
+/// one stack frame per level through the generated enum `deserialize`. A pathologically deep value
+/// would otherwise overflow the worker thread's stack and abort the process. Legitimate values nest
+/// only a handful of levels deep, so this bound never rejects real data while capping the recursion
+/// well before the stack is exhausted.
+pub const MAX_RECURSION_DEPTH: usize = 100;
 
 impl<'a> Cursor<'a> {
     /// Constructors a cursor from a slice of bytes.
     pub fn from_slice(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Records entry into one more level of recursive (boxed-enum) deserialization, returning
+    /// [`Error::RecursionLimitExceeded`] once [`MAX_RECURSION_DEPTH`] is exceeded. Each successful
+    /// call must be paired with a [`Cursor::leave_recursion`] on the success path; error paths
+    /// abort the whole deserialization so the counter need not be restored.
+    pub fn enter_recursion(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_RECURSION_DEPTH {
+            Err(Error::RecursionLimitExceeded)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Records that one level of recursive deserialization has completed successfully.
+    pub fn leave_recursion(&mut self) {
+        self.depth -= 1;
     }
 
     // TODO not a fan we need to expose this (and a way to create `Cursor`),
