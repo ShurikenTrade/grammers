@@ -242,10 +242,16 @@ impl fmt::Display for InvocationError {
 
 impl From<ReadError> for InvocationError {
     fn from(error: ReadError) -> Self {
+        // Map each ReadError variant straight to its concrete InvocationError variant. Calling
+        // `Self::from(inner)` here instead recurses forever: `From<io::Error>` (and the transport/
+        // deserialize impls below) wrap the inner value back into a `ReadError` and call this impl
+        // again, ping-ponging until the worker thread's stack overflows. This was the production
+        // SIGSEGV crash-loop — it fired whenever a connection/IO error (e.g. "connection reset",
+        // transport "bad status") was converted into an InvocationError.
         match error {
-            ReadError::Io(error) => Self::from(error),
-            ReadError::Transport(error) => Self::from(error),
-            ReadError::Deserialize(error) => Self::from(error),
+            ReadError::Io(error) => Self::Io(error),
+            ReadError::Transport(error) => Self::Transport(error),
+            ReadError::Deserialize(error) => Self::Deserialize(error),
         }
     }
 }
@@ -312,6 +318,20 @@ impl InvocationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: converting an io::Error (or any ReadError) into an InvocationError must not
+    // recurse. The `From<io::Error>`/`From<ReadError>` impls previously ping-ponged into each
+    // other and overflowed the stack on every connection/IO error (prod SIGSEGV crash-loop).
+    #[test]
+    fn io_error_converts_to_invocation_error_without_recursing() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionReset, "connection reset by peer");
+        let invocation: InvocationError = io_err.into();
+        assert!(matches!(invocation, InvocationError::Io(_)));
+
+        // The same for a ReadError wrapping each inner kind.
+        let from_read: InvocationError = ReadError::Io(io::Error::from(io::ErrorKind::BrokenPipe)).into();
+        assert!(matches!(from_read, InvocationError::Io(_)));
+    }
 
     #[test]
     fn check_rpc_error_parsing() {
